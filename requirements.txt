@@ -1,0 +1,19 @@
+# Core embedding + reranking models (all downloaded free from Hugging Face,
+# no API key required)
+sentence-transformers>=3.0.0
+
+# Dense vector index
+faiss-cpu>=1.8.0
+
+# BM25 sparse/keyword retrieval
+rank_bm25>=0.2.2
+
+# PDF text extraction
+pdfplumber>=0.11.0
+
+# Numerics
+numpy>=1.24.0
+
+# Only required if you set config.USE_LOCAL_GENERATOR = True
+transformers>=4.40.0
+torch>=2.2.0

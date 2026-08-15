@@ -1,0 +1,17 @@
+BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding
+
+Abstract. We introduce a new language representation model called BERT, which stands for Bidirectional Encoder Representations from Transformers. Unlike recent language representation models, BERT is designed to pre-train deep bidirectional representations from unlabeled text by jointly conditioning on both left and right context in all layers. As a result, the pre-trained BERT model can be fine-tuned with just one additional output layer to create state-of-the-art models for a wide range of tasks.
+
+Introduction. Language model pre-training has been shown to be effective for improving many natural language processing tasks. There are two existing strategies for applying pre-trained language representations to downstream tasks: feature-based and fine-tuning. We argue that current techniques restrict the power of the pre-trained representations, especially for the fine-tuning approaches, because standard language models are unidirectional.
+
+BERT Model Architecture. BERT's model architecture is a multi-layer bidirectional Transformer encoder. We denote the number of layers as L, the hidden size as H, and the number of self-attention heads as A. We primarily report results on two model sizes: BERT-Base with L=12, H=768, A=12, and BERT-Large with L=24, H=1024, A=16.
+
+Pre-training Tasks. We pre-train BERT using two unsupervised tasks. The first is Masked Language Model, where we simply mask some percentage of the input tokens at random and then predict those masked tokens. We mask 15 percent of all WordPiece tokens in each sequence at random. The second task is Next Sentence Prediction, which trains a model to understand sentence relationships by predicting whether sentence B is the actual sentence that follows sentence A.
+
+Pre-training Data. For the pre-training corpus we use the BooksCorpus, containing 800 million words, and English Wikipedia, containing 2,500 million words. For Wikipedia we extract only the text passages and ignore lists, tables, and headers. It is critical to use a document-level corpus rather than a shuffled sentence-level corpus in order to extract long contiguous sequences.
+
+Fine-tuning Procedure. For fine-tuning, most model hyperparameters are the same as in pre-training. We found the following ranges of possible values to work well across all tasks: batch size of 16 or 32, learning rate of 5e-5, 3e-5, or 2e-5, and 2, 3, or 4 training epochs.
+
+Results on GLUE. On the GLUE benchmark, BERT-Large obtains a score of 80.5, a 7.7 point absolute improvement over the previous state of the art. BERT-Base also achieves strong performance, outperforming all systems on all tasks by a substantial margin, obtaining 4.5% to 7.0% average accuracy improvement over the prior state of the art.
+
+Conclusion. Our results demonstrate that a language model pre-trained with a deep bidirectional architecture and rich unsupervised pre-training tasks can substantially advance performance on a broad range of natural language processing tasks, without needing task-specific architecture modifications.
