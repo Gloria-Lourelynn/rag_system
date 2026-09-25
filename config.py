@@ -69,7 +69,7 @@ RERANK_TOP_N = 5   # final number of passages handed to the answer stage
 # passages returned by the retriever, with no risk of hallucination. If you
 # additionally want a natural-language summary, set USE_LOCAL_GENERATOR=True
 # to enable a small local seq2seq model (still no API key, runs on CPU).
-USE_LOCAL_GENERATOR = False
+USE_LOCAL_GENERATOR = True
 LOCAL_GENERATOR_MODEL_NAME = "google/flan-t5-base"
 
 # ---------------------------------------------------------------------------

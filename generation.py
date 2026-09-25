@@ -116,13 +116,18 @@ class AnswerGenerator:
 
     # ------------------------------------------------------------------
     def _load_generator(self):
+        # FLAN-T5 is an encoder-decoder (seq2seq) model, not a causal
+        # decoder-only model, so it must be loaded with
+        # AutoModelForSeq2SeqLM + model.generate() rather than the
+        # "text-generation" pipeline (which only supports decoder-only
+        # models and silently produces empty output for T5).
         if self._gen_pipeline is None:
-            from transformers import pipeline
+            from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
             print(f"Loading local generator '{config.LOCAL_GENERATOR_MODEL_NAME}' ...")
-            self._gen_pipeline = pipeline(
-                "text2text-generation",
-                model=config.LOCAL_GENERATOR_MODEL_NAME,
-            )
+            tokenizer = AutoTokenizer.from_pretrained(config.LOCAL_GENERATOR_MODEL_NAME)
+            model = AutoModelForSeq2SeqLM.from_pretrained(config.LOCAL_GENERATOR_MODEL_NAME)
+            model.eval()
+            self._gen_pipeline = (tokenizer, model)
         return self._gen_pipeline
 
     # ------------------------------------------------------------------
@@ -140,47 +145,147 @@ class AnswerGenerator:
         return citations
 
     # ------------------------------------------------------------------
-    def _extractive_answer(self, query: str, passages: List[RetrievedPassage],
-                            citations: List[Citation]) -> List[AnswerSentence]:
-        """Compose an answer out of the single most relevant sentence from
-        each top passage. Since these sentences are copied verbatim from
-        the source chunk, verification is always True by construction."""
-        sentences = []
+    def _extractive_answer(
+            self,
+            query: str,
+            passages: List[RetrievedPassage],
+            citations: List[Citation],
+    ) -> List[AnswerSentence]:
+        """Select the most relevant sentences across all retrieved passages."""
+
+        candidates = []
+        q_emb = self.embedder.encode(
+            [query],
+            normalize_embeddings=True,
+            )
+
+    # Collect candidate sentences from all retrieved passages
         for p, c in zip(passages, citations):
             candidate_sents = _split_sentences(p.chunk.text)
             if not candidate_sents:
                 continue
-            # Pick the sentence within the chunk most relevant to the query.
-            sent_embs = self.embedder.encode(candidate_sents, normalize_embeddings=True)
-            q_emb = self.embedder.encode([query], normalize_embeddings=True)
-            sims = util.cos_sim(q_emb, sent_embs)[0].tolist()
-            best_i = int(np.argmax(sims))
-            best_sentence = candidate_sents[best_i]
 
-            sentences.append(AnswerSentence(
-                text=best_sentence,
-                citation_marker=c.marker,
-                verified=True,           # verbatim excerpt -> trivially grounded
-                similarity=1.0,
-            ))
-        return sentences
+            sent_embs = self.embedder.encode(
+            candidate_sents,
+            normalize_embeddings=True,
+            )
+
+            sims = util.cos_sim(q_emb, sent_embs)[0].tolist()
+
+            for sentence, similarity in zip(candidate_sents, sims):
+                candidates.append({
+                "text": sentence,
+                "citation": c,
+                "similarity": float(similarity),
+            })
+
+        if not candidates:
+            return []
+
+    # Highest semantic relevance first
+        candidates.sort(
+            key=lambda x: x["similarity"],
+            reverse=True,
+            )
+
+        selected = []
+        seen = set()
+
+        for candidate in candidates:
+            sentence = candidate["text"].strip()
+
+            normalized = re.sub(
+                r"\W+",
+                " ",
+                sentence.lower(),
+            ).strip()
+
+            if not sentence or normalized in seen:
+                continue
+
+            seen.add(normalized)
+
+            selected.append(
+                AnswerSentence(
+                    text=sentence,
+                    citation_marker=candidate["citation"].marker,
+                    verified=True,
+                    similarity=candidate["similarity"],
+            )
+        )
+
+        # Keep the answer concise
+            if len(selected) >= 3:
+                break
+
+        return selected
 
     # ------------------------------------------------------------------
     def _abstractive_answer(self, query: str, passages: List[RetrievedPassage],
                              citations: List[Citation]) -> List[AnswerSentence]:
         """Generate a fluent paraphrase with a local seq2seq model, then
         verify each generated sentence against its cited source chunk."""
-        gen = self._load_generator()
+        tokenizer, model = self._load_generator()
 
-        context_block = "\n".join(
-            f"{c.marker} {p.chunk.text}" for p, c in zip(passages, citations)
-        )
-        prompt = (
+        instruction = (
             "Answer the question using only the numbered context passages. "
             "After every claim, include the matching [n] citation marker.\n\n"
-            f"Question: {query}\n\nContext:\n{context_block}\n\nAnswer:"
+            f"Question: {query}\n\nContext:\n"
         )
-        raw_output = gen(prompt, max_new_tokens=220, do_sample=False)[0]["generated_text"]
+        suffix = "\n\nAnswer:"
+
+        # FLAN-T5-base has a 512-token *input* limit. The naive prompt here
+        # can run to ~1500+ tokens once 5 reranked passages are concatenated,
+        # which silently truncates mid-passage (or errors) and is why the
+        # old code produced a blank "Answer:". Instead, build the context
+        # token-budget-aware: reserve room for the instruction/question/
+        # suffix, then pack in as many whole (or safely truncated) cited
+        # passages as fit, so every passage included in the prompt is
+        # complete and the citation markers stay meaningful.
+        max_input_tokens = tokenizer.model_max_length
+        if not max_input_tokens or max_input_tokens > 100_000:
+            max_input_tokens = 512  # guard against a misconfigured/absurd default
+
+        reserved = len(tokenizer(instruction + suffix, add_special_tokens=True)["input_ids"])
+        budget = max(max_input_tokens - reserved, 0)
+
+        context_parts = []
+        used = 0
+        for p, c in zip(passages, citations):
+            piece = f"{c.marker} {p.chunk.text}\n"
+            piece_ids = tokenizer(piece, add_special_tokens=False)["input_ids"]
+            if used + len(piece_ids) > budget:
+                remaining = budget - used
+                if remaining > 10:  # only worth including a truncated fragment
+                    piece_ids = piece_ids[:remaining]
+                    context_parts.append(tokenizer.decode(piece_ids, skip_special_tokens=True))
+                break
+            context_parts.append(piece)
+            used += len(piece_ids)
+
+        context_block = "".join(context_parts).strip()
+        prompt = instruction + context_block + suffix
+
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_input_tokens,
+        )
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=220,   # generation-length cap; no longer paired with
+                                  # a conflicting input-side max_length
+            num_beams=4,
+            no_repeat_ngram_size=3,
+            early_stopping=True,
+        )
+        raw_output = tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+
+        if not raw_output:
+            # Generation produced nothing usable -- fall back to the
+            # extractive mode rather than returning a blank answer.
+            return self._extractive_answer(query, passages, citations)
 
         gen_sentences = _split_sentences(raw_output)
         chunk_lookup = {c.marker: p.chunk for p, c in zip(passages, citations)}

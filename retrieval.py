@@ -67,34 +67,95 @@ class HybridRetriever:
         return fused, dense_rank_map, bm25_rank_map
 
     # ------------------------------------------------------------------
-    def retrieve(self, query: str, top_n: int = config.RERANK_TOP_N) -> List[RetrievedPassage]:
-        dense_hits = self.index.dense_search(query, config.DENSE_TOP_K)
-        bm25_hits = self.index.bm25_search(query, config.BM25_TOP_K)
+    def retrieve(
+    self,
+    query: str,
+    top_n: int = config.RERANK_TOP_N
+) -> List[RetrievedPassage]:
 
-        fused, dense_rank_map, bm25_rank_map = self._reciprocal_rank_fusion(dense_hits, bm25_hits)
+        # --------------------------------------------------------------
+        # 1. Dense retrieval
+        # --------------------------------------------------------------
+        dense_hits = self.index.dense_search(
+            query,
+            config.DENSE_TOP_K
+        )
 
-        # Take a generous candidate pool into the reranker (cheap dense/BM25
-        # stage narrows millions -> dozens; the expensive cross-encoder then
-        # narrows dozens -> the final handful).
+        # --------------------------------------------------------------
+        # 2. BM25 retrieval
+        # --------------------------------------------------------------
+        bm25_hits = self.index.bm25_search(
+            query,
+            config.BM25_TOP_K
+        )
+
+        # --------------------------------------------------------------
+        # 3. Reciprocal Rank Fusion
+        # --------------------------------------------------------------
+        fused, dense_rank_map, bm25_rank_map = (
+            self._reciprocal_rank_fusion(
+                dense_hits,
+                bm25_hits
+            )
+        )
+
+        # --------------------------------------------------------------
+        # 4. Candidate pool
+        # --------------------------------------------------------------
         candidate_pool = fused[:max(top_n * 4, 20)]
 
         passages = []
+
         for idx, fusion_score in candidate_pool:
-            passages.append(RetrievedPassage(
-                chunk=self.index.chunks[idx],
-                dense_rank=dense_rank_map.get(idx),
-                bm25_rank=bm25_rank_map.get(idx),
-                fusion_score=fusion_score,
-            ))
+            passages.append(
+                RetrievedPassage(
+                    chunk=self.index.chunks[idx],
+                    dense_rank=dense_rank_map.get(idx),
+                    bm25_rank=bm25_rank_map.get(idx),
+                    fusion_score=fusion_score,
+                )
+            )
 
         if not passages:
             return []
 
-        # Cross-encoder re-ranking: scores (query, passage) jointly.
-        pairs = [(query, p.chunk.text) for p in passages]
-        rerank_scores = self.reranker.predict(pairs)
-        for p, s in zip(passages, rerank_scores):
-            p.rerank_score = float(s)
+        # --------------------------------------------------------------
+        # 5. Cross-encoder reranking
+        # --------------------------------------------------------------
+        pairs = [
+            (query, p.chunk.text)
+            for p in passages
+        ]
 
-        passages.sort(key=lambda p: p.rerank_score, reverse=True)
+        rerank_scores = self.reranker.predict(pairs)
+
+        # Store the cross-encoder score on EVERY passage
+        for p, score in zip(passages, rerank_scores):
+            p.rerank_score = float(score)
+
+        # --------------------------------------------------------------
+        # 6. Debug: show reranker results
+        # --------------------------------------------------------------
+        print("\nReranker scores:")
+
+        for p in passages:
+            print(
+                f"  {p.rerank_score:.4f} | "
+                f"p.{p.chunk.page} | "
+                f"{p.chunk.text[:120]}"
+            )
+
+        # --------------------------------------------------------------
+        # 7. Sort by reranker score
+        # --------------------------------------------------------------
+        passages.sort(
+            key=lambda p: p.rerank_score,
+            reverse=True
+        )
+
         return passages[:top_n]
+    
+
+        
+
+        

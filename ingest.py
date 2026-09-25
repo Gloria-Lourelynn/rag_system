@@ -58,22 +58,69 @@ def _chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
 
 
 def _clean_text(text: str) -> str:
-    """Light cleanup of PDF text extraction artifacts."""
-    text = re.sub(r"-\n", "", text)          # de-hyphenate line-wrapped words
-    text = re.sub(r"\s+", " ", text)          # collapse whitespace/newlines
+    """Clean common PDF extraction artifacts."""
+
+    # Join words broken across PDF line breaks
+    text = re.sub(r"-\s*\n\s*", "", text)
+
+    # Normalize whitespace
+    text = re.sub(r"\s+", " ", text)
+
+    # Fix common missing spaces caused by PDF extraction
+    text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
+
     return text.strip()
 
+def _remove_references(text: str) -> str:
+    """Remove the bibliography/reference section from a paper."""
+
+    # Most research papers have a final 'References' heading.
+    match = re.search(
+        r"\bReferences\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        return text[:match.start()].strip()
+
+    return text
 
 def load_pdf(path: Path) -> List[Chunk]:
     """Extract text page-by-page from a PDF and chunk each page."""
     chunks = []
+    in_references = False
+
     with pdfplumber.open(path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            raw = page.extract_text() or ""
+
+            raw = page.extract_text(
+                x_tolerance=2,
+                y_tolerance=3) or ""
+            
             text = _clean_text(raw)
+            text = _remove_references(text)
+
             if not text:
                 continue
+            if re.search(r"\bReferences\b", text, re.IGNORECASE):
+                in_references = True
+
+                # Keep only the text before References
+                text = re.split(
+                    r"\bReferences\b",
+                    text,
+                    maxsplit=1,
+                    flags=re.IGNORECASE
+                )[0].strip()
+            elif in_references:
+                continue
+
+            if not text:
+                continue
+
             pieces = _chunk_text(text, config.CHUNK_SIZE_WORDS, config.CHUNK_OVERLAP_WORDS)
+            
             for i, piece in enumerate(pieces):
                 chunks.append(Chunk(
                     chunk_id=f"{path.stem}_p{page_num}_c{i}",
